@@ -1,0 +1,650 @@
+--[[
+  ████████╗ ██████╗ ██╗   ██╗ ██████╗██╗  ██╗██╗     ██╗███╗   ██╗███████╗
+  ╚══██╔══╝██╔═══██╗██║   ██║██╔════╝██║  ██║██║     ██║████╗  ██║██╔════╝
+     ██║   ██║   ██║██║   ██║██║     ███████║██║     ██║██╔██╗ ██║█████╗
+     ██║   ██║   ██║██║   ██║██║     ██╔══██║██║     ██║██║╚██╗██║██╔══╝
+     ██║   ╚██████╔╝╚██████╔╝╚██████╗██║  ██║███████╗██║██║ ╚████║███████╗
+     ╚═╝    ╚═════╝  ╚═════╝  ╚═════╝╚═╝  ╚═╝╚══════╝╚═╝╚═╝  ╚═══╝╚══════╝
+
+  HitboxPro v2.0 — Touchline (Linha de Toque)
+  Compatível: Xeno, Solara, Delta, Wave, Awaken, JJSploit+
+  Expand o reach do toque, mostra hitbox em tempo real,
+  desativa colisão da bola quando ativo.
+
+  Como funciona:
+    GetPartBoundsInBox(HRP.CFrame * offset, size, nil)
+    Dribble  → size (2.25,5.5,1.5)  offset(0,-0.5,-0.25)
+    Shoot    → size (2.25,5.5,2.5)  offset(0,-0.5,0)
+    Tackle   → size (2.25,3,5.25)   offset(0,-1.75,-0.5)
+  Nós hookamos __namecall e substituímos o size pelo nosso.
+]]
+
+-- ════════════════════════════════════════════════════
+--                     SERVIÇOS
+-- ════════════════════════════════════════════════════
+local Players        = game:GetService("Players")
+local RunService     = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService   = game:GetService("TweenService")
+local lp             = Players.LocalPlayer
+
+-- ════════════════════════════════════════════════════
+--                     CONFIG
+-- ════════════════════════════════════════════════════
+local CFG = {
+    -- Reach (studs) — padrão shoot é Z=2.5, dribble Z=1.5, tackle Z=5.25
+    ReachX        = 2.25,
+    ReachY        = 5.5,
+    ReachZ        = 5.5,
+    OffsetY       = -0.5,
+    OffsetZ       = -0.25,
+
+    HitboxEnabled = false,
+    ShowVisual    = false,
+    NoBallCollide = false,
+}
+
+-- ════════════════════════════════════════════════════
+--                  HOOK — __namecall
+-- ════════════════════════════════════════════════════
+local oldNamecall
+oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+    local method = getnamecallmethod()
+
+    if method == "GetPartBoundsInBox" and CFG.HitboxEnabled then
+        local args = { ... }
+        -- args[1] = CFrame, args[2] = Vector3 size, args[3] = OverlapParams/nil
+        if args[1] and typeof(args[1]) == "CFrame"
+        and args[2] and typeof(args[2]) == "Vector3"
+        then
+            -- só modifica se parece o hitbox de toque (Y >= 2 para filtrar outros usos)
+            if args[2].Y >= 2 then
+                args[2] = Vector3.new(CFG.ReachX, CFG.ReachY, CFG.ReachZ)
+            end
+        end
+        return oldNamecall(self, table.unpack(args))
+    end
+
+    return oldNamecall(self, ...)
+end)
+
+-- ════════════════════════════════════════════════════
+--              HITBOX VISUAL — parte que segue HRP
+-- ════════════════════════════════════════════════════
+local visualPart   = nil
+local visualWeld   = nil
+local selectionBox = nil
+
+local function buildVisual()
+    if visualPart then visualPart:Destroy() end
+
+    local char = lp.Character
+    if not char then return end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+
+    visualPart = Instance.new("Part")
+    visualPart.Name        = "_HBProVisual"
+    visualPart.Size        = Vector3.new(CFG.ReachX, CFG.ReachY, CFG.ReachZ)
+    visualPart.CFrame      = hrp.CFrame * CFrame.new(0, CFG.OffsetY, CFG.OffsetZ)
+    visualPart.CanCollide  = false
+    visualPart.CanQuery    = false
+    visualPart.CanTouch    = false
+    visualPart.Massless    = true
+    visualPart.Anchored    = false
+    visualPart.Transparency = 1          -- invisível — o SelectionBox desenha
+    visualPart.CastShadow  = false
+    visualPart.Parent      = workspace.CurrentCamera
+
+    visualWeld          = Instance.new("WeldConstraint")
+    visualWeld.Part0    = hrp
+    visualWeld.Part1    = visualPart
+    visualWeld.Parent   = visualPart
+
+    selectionBox                = Instance.new("SelectionBox")
+    selectionBox.Adornee        = visualPart
+    selectionBox.Color3         = Color3.fromRGB(0, 255, 120)
+    selectionBox.LineThickness  = 0.06
+    selectionBox.SurfaceTransparency = 0.85
+    selectionBox.SurfaceColor3  = Color3.fromRGB(0, 255, 120)
+    selectionBox.Parent         = workspace.CurrentCamera
+end
+
+local function destroyVisual()
+    if selectionBox then selectionBox:Destroy() selectionBox = nil end
+    if visualPart   then visualPart:Destroy()   visualPart   = nil end
+    visualWeld = nil
+end
+
+-- atualiza tamanho do visual em tempo real
+RunService.Heartbeat:Connect(function()
+    if CFG.ShowVisual and visualPart then
+        visualPart.Size = Vector3.new(CFG.ReachX, CFG.ReachY, CFG.ReachZ)
+        -- recalcula weld offset
+        local hrp = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+        if hrp and not visualWeld then
+            visualWeld          = Instance.new("WeldConstraint")
+            visualWeld.Part0    = hrp
+            visualWeld.Part1    = visualPart
+            visualWeld.Parent   = visualPart
+        end
+    end
+end)
+
+-- reconstrói visual após respawn
+lp.CharacterAdded:Connect(function()
+    task.wait(1)
+    if CFG.ShowVisual then buildVisual() end
+end)
+
+-- ════════════════════════════════════════════════════
+--              NO BALL COLLIDE
+-- ════════════════════════════════════════════════════
+local function applyBallCollide(state)
+    local folder = workspace:FindFirstChild("Footballs")
+    if not folder then return end
+    for _, v in ipairs(folder:GetChildren()) do
+        if v.Name == "Ball" and v:IsA("BasePart") then
+            v.CanCollide = state   -- false = sem colisão
+        end
+    end
+end
+
+-- mantém sem colisão se bolas aparecerem depois
+RunService.Heartbeat:Connect(function()
+    if CFG.NoBallCollide then
+        local folder = workspace:FindFirstChild("Footballs")
+        if folder then
+            for _, v in ipairs(folder:GetChildren()) do
+                if v.Name == "Ball" and v:IsA("BasePart") and v.CanCollide then
+                    v.CanCollide = false
+                end
+            end
+        end
+    end
+end)
+
+-- ════════════════════════════════════════════════════
+--                        GUI
+-- ════════════════════════════════════════════════════
+-- remove instâncias anteriores
+for _, v in ipairs(lp.PlayerGui:GetChildren()) do
+    if v.Name == "_HBPro" then v:Destroy() end
+end
+
+local sg = Instance.new("ScreenGui")
+sg.Name              = "_HBPro"
+sg.ResetOnSpawn      = false
+sg.ZIndexBehavior    = Enum.ZIndexBehavior.Sibling
+sg.IgnoreGuiInset    = true
+sg.Parent            = lp.PlayerGui
+
+-- ─── Cores ───────────────────────────────────────────
+local C = {
+    bg      = Color3.fromRGB(12,  12,  20 ),
+    panel   = Color3.fromRGB(18,  18,  30 ),
+    border  = Color3.fromRGB(30,  30,  50 ),
+    accent  = Color3.fromRGB(0,   220, 110),
+    accent2 = Color3.fromRGB(0,   140, 255),
+    red     = Color3.fromRGB(255, 70,  70 ),
+    text    = Color3.fromRGB(220, 220, 235),
+    subtext = Color3.fromRGB(120, 120, 145),
+    white   = Color3.fromRGB(255, 255, 255),
+    toggle_on  = Color3.fromRGB(0,   200, 100),
+    toggle_off = Color3.fromRGB(55,  55,  75 ),
+}
+
+-- ─── Helpers ─────────────────────────────────────────
+local function corner(parent, r)
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, r or 8)
+    c.Parent = parent
+    return c
+end
+local function stroke(parent, color, thick)
+    local s = Instance.new("UIStroke")
+    s.Color     = color or C.border
+    s.Thickness = thick or 1.2
+    s.Parent    = parent
+    return s
+end
+local function lbl(parent, text, size, color, weight)
+    local t = Instance.new("TextLabel")
+    t.BackgroundTransparency = 1
+    t.Text      = text or ""
+    t.TextSize  = size or 13
+    t.TextColor3 = color or C.text
+    t.Font      = weight or Enum.Font.GothamBold
+    t.Parent    = parent
+    return t
+end
+local function tween(obj, props, dur, style, dir)
+    TweenService:Create(obj, TweenInfo.new(dur or 0.18, style or Enum.EasingStyle.Quad, dir or Enum.EasingDirection.Out), props):Play()
+end
+
+-- ─── Janela Principal ────────────────────────────────
+local win = Instance.new("Frame")
+win.Name              = "Window"
+win.Size              = UDim2.new(0, 310, 0, 430)
+win.Position          = UDim2.new(0, 40, 0, 120)
+win.BackgroundColor3  = C.bg
+win.ClipsDescendants  = true
+win.Parent            = sg
+corner(win, 12)
+stroke(win, C.border, 1.5)
+
+-- sombra externa
+local shadow = Instance.new("ImageLabel")
+shadow.Size              = UDim2.new(1, 30, 1, 30)
+shadow.Position          = UDim2.new(0, -15, 0, -10)
+shadow.BackgroundTransparency = 1
+shadow.Image             = "rbxassetid://5554236805"
+shadow.ImageColor3       = Color3.fromRGB(0,0,0)
+shadow.ImageTransparency = 0.55
+shadow.ScaleType         = Enum.ScaleType.Slice
+shadow.SliceCenter       = Rect.new(23,23,277,277)
+shadow.ZIndex            = 0
+shadow.Parent            = win
+
+-- ─── Título / Topbar ────────────────────────────────
+local topbar = Instance.new("Frame")
+topbar.Size             = UDim2.new(1, 0, 0, 42)
+topbar.BackgroundColor3 = C.panel
+topbar.ZIndex           = 2
+topbar.Parent           = win
+corner(topbar, 12)
+
+-- fix do canto inferior do topbar (square)
+local topFix = Instance.new("Frame")
+topFix.Size             = UDim2.new(1, 0, 0, 12)
+topFix.Position         = UDim2.new(0, 0, 1, -12)
+topFix.BackgroundColor3 = C.panel
+topFix.BorderSizePixel  = 0
+topFix.ZIndex           = 2
+topFix.Parent           = topbar
+
+-- acento esquerdo colorido
+local accentBar = Instance.new("Frame")
+accentBar.Size             = UDim2.new(0, 4, 0.55, 0)
+accentBar.Position         = UDim2.new(0, 10, 0.225, 0)
+accentBar.BackgroundColor3 = C.accent
+accentBar.ZIndex           = 3
+accentBar.Parent           = topbar
+corner(accentBar, 2)
+
+local titleLbl = lbl(topbar, "⚽  HitboxPro", 15, C.white, Enum.Font.GothamBold)
+titleLbl.Size     = UDim2.new(1, -60, 1, 0)
+titleLbl.Position = UDim2.new(0, 22, 0, 0)
+titleLbl.TextXAlignment = Enum.TextXAlignment.Left
+titleLbl.ZIndex   = 3
+
+local subLbl = lbl(topbar, "Touchline", 10, C.subtext, Enum.Font.Gotham)
+subLbl.Size     = UDim2.new(0, 80, 1, 0)
+subLbl.Position = UDim2.new(1, -86, 0, 0)
+subLbl.TextXAlignment = Enum.TextXAlignment.Right
+subLbl.ZIndex   = 3
+
+-- botão fechar
+local closeBtn = Instance.new("TextButton")
+closeBtn.Size              = UDim2.new(0, 28, 0, 28)
+closeBtn.Position          = UDim2.new(1, -36, 0.5, -14)
+closeBtn.BackgroundColor3  = Color3.fromRGB(200, 50, 50)
+closeBtn.Text              = "✕"
+closeBtn.TextColor3        = C.white
+closeBtn.TextSize          = 11
+closeBtn.Font              = Enum.Font.GothamBold
+closeBtn.ZIndex            = 4
+closeBtn.Parent            = topbar
+corner(closeBtn, 6)
+closeBtn.MouseButton1Click:Connect(function()
+    destroyVisual()
+    applyBallCollide(true)
+    sg:Destroy()
+end)
+
+-- ─── Drag ────────────────────────────────────────────
+do
+    local dragging, dragStart, startPos
+    topbar.InputBegan:Connect(function(inp)
+        if inp.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging  = true
+            dragStart = inp.Position
+            startPos  = win.Position
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(inp)
+        if dragging and inp.UserInputType == Enum.UserInputType.MouseMovement then
+            local delta = inp.Position - dragStart
+            win.Position = UDim2.new(
+                startPos.X.Scale, startPos.X.Offset + delta.X,
+                startPos.Y.Scale, startPos.Y.Offset + delta.Y
+            )
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(inp)
+        if inp.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = false
+        end
+    end)
+end
+
+-- ─── Scroll / Body ───────────────────────────────────
+local body = Instance.new("ScrollingFrame")
+body.Size              = UDim2.new(1, 0, 1, -42)
+body.Position          = UDim2.new(0, 0, 0, 42)
+body.BackgroundTransparency = 1
+body.ScrollBarThickness = 3
+body.ScrollBarImageColor3 = C.accent
+body.CanvasSize        = UDim2.new(0, 0, 0, 0)
+body.AutomaticCanvasSize = Enum.AutomaticSize.Y
+body.Parent            = win
+
+local bodyLayout = Instance.new("UIListLayout")
+bodyLayout.Padding  = UDim.new(0, 6)
+bodyLayout.Parent   = body
+
+local bodyPad = Instance.new("UIPadding")
+bodyPad.PaddingTop    = UDim.new(0, 10)
+bodyPad.PaddingLeft   = UDim.new(0, 12)
+bodyPad.PaddingRight  = UDim.new(0, 12)
+bodyPad.PaddingBottom = UDim.new(0, 10)
+bodyPad.Parent        = body
+
+-- ════════ BUILDERS ════════════════════════════════════
+-- Seção header
+local function mkSection(text)
+    local f = Instance.new("Frame")
+    f.Size             = UDim2.new(1, 0, 0, 22)
+    f.BackgroundTransparency = 1
+    f.Parent           = body
+
+    local l = lbl(f, "  " .. string.upper(text), 10, C.accent, Enum.Font.GothamBold)
+    l.Size             = UDim2.new(0.6, 0, 1, 0)
+    l.TextXAlignment   = Enum.TextXAlignment.Left
+
+    local line = Instance.new("Frame")
+    line.Size          = UDim2.new(1, 0, 0, 1)
+    line.Position      = UDim2.new(0, 0, 1, -1)
+    line.BackgroundColor3 = C.border
+    line.BorderSizePixel = 0
+    line.Parent        = f
+    return f
+end
+
+-- Toggle button
+local function mkToggle(labelText, descText, initState, callback)
+    local card = Instance.new("Frame")
+    card.Size             = UDim2.new(1, 0, 0, 56)
+    card.BackgroundColor3 = C.panel
+    card.Parent           = body
+    corner(card, 8)
+    stroke(card, C.border)
+
+    local lbTop = lbl(card, labelText, 13, C.white, Enum.Font.GothamBold)
+    lbTop.Size     = UDim2.new(1, -65, 0, 18)
+    lbTop.Position = UDim2.new(0, 12, 0, 9)
+    lbTop.TextXAlignment = Enum.TextXAlignment.Left
+
+    local lbSub = lbl(card, descText, 10, C.subtext, Enum.Font.Gotham)
+    lbSub.Size     = UDim2.new(1, -65, 0, 16)
+    lbSub.Position = UDim2.new(0, 12, 0, 30)
+    lbSub.TextXAlignment = Enum.TextXAlignment.Left
+    lbSub.TextWrapped = true
+
+    -- Track + pill
+    local track = Instance.new("Frame")
+    track.Size             = UDim2.new(0, 44, 0, 22)
+    track.Position         = UDim2.new(1, -56, 0.5, -11)
+    track.BackgroundColor3 = initState and C.toggle_on or C.toggle_off
+    track.Parent           = card
+    corner(track, 11)
+
+    local pill = Instance.new("Frame")
+    pill.Size              = UDim2.new(0, 16, 0, 16)
+    pill.Position          = initState and UDim2.new(1, -19, 0.5, -8) or UDim2.new(0, 3, 0.5, -8)
+    pill.BackgroundColor3  = C.white
+    pill.Parent            = track
+    corner(pill, 8)
+
+    local state = initState
+    local btn = Instance.new("TextButton")
+    btn.Size               = UDim2.new(1, 0, 1, 0)
+    btn.BackgroundTransparency = 1
+    btn.Text               = ""
+    btn.Parent             = card
+    btn.MouseButton1Click:Connect(function()
+        state = not state
+        tween(track, { BackgroundColor3 = state and C.toggle_on or C.toggle_off })
+        tween(pill, { Position = state and UDim2.new(1,-19,0.5,-8) or UDim2.new(0,3,0.5,-8) })
+        callback(state)
+    end)
+
+    return card, function() return state end
+end
+
+-- Slider
+local function mkSlider(labelText, minVal, maxVal, initVal, fmt, callback)
+    local card = Instance.new("Frame")
+    card.Size             = UDim2.new(1, 0, 0, 70)
+    card.BackgroundColor3 = C.panel
+    card.Parent           = body
+    corner(card, 8)
+    stroke(card, C.border)
+
+    local lb = lbl(card, labelText, 12, C.text, Enum.Font.GothamBold)
+    lb.Size     = UDim2.new(0.65, 0, 0, 18)
+    lb.Position = UDim2.new(0, 12, 0, 8)
+    lb.TextXAlignment = Enum.TextXAlignment.Left
+
+    local fmt_str = fmt or "%.2f"
+    local valLbl = lbl(card, string.format(fmt_str, initVal), 12, C.accent, Enum.Font.GothamBold)
+    valLbl.Size     = UDim2.new(0.35, -12, 0, 18)
+    valLbl.Position = UDim2.new(0.65, 0, 0, 8)
+    valLbl.TextXAlignment = Enum.TextXAlignment.Right
+
+    local track = Instance.new("Frame")
+    track.Size             = UDim2.new(1, -24, 0, 6)
+    track.Position         = UDim2.new(0, 12, 0, 36)
+    track.BackgroundColor3 = C.border
+    track.Parent           = card
+    corner(track, 3)
+
+    local fill = Instance.new("Frame")
+    fill.Size              = UDim2.new((initVal - minVal)/(maxVal - minVal), 0, 1, 0)
+    fill.BackgroundColor3  = C.accent
+    fill.Parent            = track
+    corner(fill, 3)
+
+    local knob = Instance.new("Frame")
+    knob.Size              = UDim2.new(0, 14, 0, 14)
+    knob.Position          = UDim2.new((initVal - minVal)/(maxVal - minVal), -7, 0.5, -7)
+    knob.BackgroundColor3  = C.white
+    knob.Parent            = track
+    corner(knob, 7)
+
+    -- min/max labels
+    local minL = lbl(card, tostring(minVal), 9, C.subtext, Enum.Font.Gotham)
+    minL.Size     = UDim2.new(0, 30, 0, 14)
+    minL.Position = UDim2.new(0, 12, 0, 50)
+    minL.TextXAlignment = Enum.TextXAlignment.Left
+    local maxL = lbl(card, tostring(maxVal), 9, C.subtext, Enum.Font.Gotham)
+    maxL.Size     = UDim2.new(0, 30, 0, 14)
+    maxL.Position = UDim2.new(1, -42, 0, 50)
+    maxL.TextXAlignment = Enum.TextXAlignment.Right
+
+    local dragging = false
+    local curVal = initVal
+
+    local function updateSlider(absX)
+        local relX = math.clamp((absX - track.AbsolutePosition.X) / track.AbsoluteSize.X, 0, 1)
+        curVal = math.floor((minVal + relX * (maxVal - minVal)) * 100 + 0.5) / 100
+        fill.Size     = UDim2.new(relX, 0, 1, 0)
+        knob.Position = UDim2.new(relX, -7, 0.5, -7)
+        valLbl.Text   = string.format(fmt_str, curVal)
+        callback(curVal)
+    end
+
+    track.InputBegan:Connect(function(inp)
+        if inp.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = true
+            updateSlider(inp.Position.X)
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(inp)
+        if dragging and inp.UserInputType == Enum.UserInputType.MouseMovement then
+            updateSlider(inp.Position.X)
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(inp)
+        if inp.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = false
+        end
+    end)
+
+    return card
+end
+
+-- Info banner
+local function mkInfo(text)
+    local f = Instance.new("Frame")
+    f.Size             = UDim2.new(1, 0, 0, 38)
+    f.BackgroundColor3 = Color3.fromRGB(10, 10, 18)
+    f.Parent           = body
+    corner(f, 8)
+    local border = stroke(f, C.border)
+
+    local l = lbl(f, text, 10, C.subtext, Enum.Font.Gotham)
+    l.Size     = UDim2.new(1, -16, 1, 0)
+    l.Position = UDim2.new(0, 8, 0, 0)
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.TextWrapped    = true
+    return f, l
+end
+
+-- ════════ CONSTRUÇÃO DOS CONTROLES ════════════════════
+
+-- ▸ REACH EXTENDER
+mkSection("Reach Extender")
+
+mkToggle(
+    "Reach Ativo",
+    "Expande a hitbox de detecção da bola",
+    false,
+    function(on)
+        CFG.HitboxEnabled = on
+    end
+)
+
+mkSlider("Reach X  (lateral)", 2.25, 12, CFG.ReachX, "%.2f studs", function(v)
+    CFG.ReachX = v
+    if visualPart then visualPart.Size = Vector3.new(CFG.ReachX, CFG.ReachY, CFG.ReachZ) end
+end)
+
+mkSlider("Reach Y  (altura)", 2, 14, CFG.ReachY, "%.2f studs", function(v)
+    CFG.ReachY = v
+    if visualPart then visualPart.Size = Vector3.new(CFG.ReachX, CFG.ReachY, CFG.ReachZ) end
+end)
+
+mkSlider("Reach Z  (frente ← PRINCIPAL)", 1.5, 14, CFG.ReachZ, "%.2f studs", function(v)
+    CFG.ReachZ = v
+    if visualPart then visualPart.Size = Vector3.new(CFG.ReachX, CFG.ReachY, CFG.ReachZ) end
+end)
+
+-- ▸ HITBOX VISUAL
+mkSection("Hitbox Visual")
+
+mkToggle(
+    "Mostrar Hitbox",
+    "Box verde mostrando área de detecção em tempo real",
+    false,
+    function(on)
+        CFG.ShowVisual = on
+        if on then
+            buildVisual()
+        else
+            destroyVisual()
+        end
+    end
+)
+
+-- ▸ BOLA
+mkSection("Bola")
+
+mkToggle(
+    "Sem Colisão — Bola",
+    "Remove o CanCollide das bolas (passa direto)",
+    false,
+    function(on)
+        CFG.NoBallCollide = on
+        if not on then applyBallCollide(true) end
+    end
+)
+
+-- ▸ PRESET RÁPIDO
+mkSection("Presets Rápidos")
+
+-- presets como botões lado a lado
+local presetRow = Instance.new("Frame")
+presetRow.Size             = UDim2.new(1, 0, 0, 36)
+presetRow.BackgroundTransparency = 1
+presetRow.Parent           = body
+
+local presetLayout = Instance.new("UIListLayout")
+presetLayout.FillDirection = Enum.FillDirection.Horizontal
+presetLayout.Padding       = UDim.new(0, 6)
+presetLayout.Parent        = presetRow
+
+local PRESETS = {
+    { "Suave",  2.25, 5.5,  3.5,  C.accent2  },
+    { "Médio",  2.25, 5.5,  6.0,  C.accent   },
+    { "Máximo", 5.0,  7.0,  12.0, C.red      },
+}
+
+for _, p in ipairs(PRESETS) do
+    local pbtn = Instance.new("TextButton")
+    pbtn.Size             = UDim2.new(0, 88, 0, 30)
+    pbtn.BackgroundColor3 = p[5]
+    pbtn.Text             = p[1]
+    pbtn.TextColor3       = C.white
+    pbtn.TextSize         = 11
+    pbtn.Font             = Enum.Font.GothamBold
+    pbtn.Parent           = presetRow
+    corner(pbtn, 7)
+    local pX, pY, pZ = p[2], p[3], p[4]
+    pbtn.MouseButton1Click:Connect(function()
+        CFG.ReachX = pX CFG.ReachY = pY CFG.ReachZ = pZ
+        -- rebuild visual if active
+        if CFG.ShowVisual then
+            destroyVisual()
+            buildVisual()
+        end
+        tween(pbtn, { BackgroundColor3 = Color3.fromRGB(255,255,255) }, 0.08)
+        task.delay(0.12, function()
+            tween(pbtn, { BackgroundColor3 = p[5] }, 0.12)
+        end)
+    end)
+end
+
+-- ▸ INFO
+mkSection("Info")
+
+local _, infoLabel = mkInfo(
+    "⚡ Hook ativo em GetPartBoundsInBox\n" ..
+    "🟢 Dribble padrão Z=1.5  Shoot Z=2.5  Tackle Z=5.25"
+)
+
+-- status dinâmico
+RunService.Heartbeat:Connect(function()
+    local status = CFG.HitboxEnabled
+        and ("✅ Reach ON  |  X=" .. string.format("%.1f", CFG.ReachX)
+          .. "  Y=" .. string.format("%.1f", CFG.ReachY)
+          .. "  Z=" .. string.format("%.1f", CFG.ReachZ))
+        or "⬛ Reach OFF  — toggle para ativar"
+    if infoLabel and infoLabel.Parent then
+        infoLabel.Text = status
+        infoLabel.TextColor3 = CFG.HitboxEnabled and C.accent or C.subtext
+    end
+end)
+
+print("[HitboxPro] Script carregado com sucesso ✅")
+print("[HitboxPro] Executor detectado — hookmetamethod ativo em GetPartBoundsInBox")
